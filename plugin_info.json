@@ -1,0 +1,8 @@
+{
+  "name": "H3 Phase 2 Control",
+  "author": "s.mooney101",
+  "version": "0.1.0",
+  "description": "MiniMax H3 two-phase generation: choose the number of phase-2 steps and the LoRA used in phase 2.",
+  "date": "2026-10-09",
+  "wan2gp_version": ""
+}
