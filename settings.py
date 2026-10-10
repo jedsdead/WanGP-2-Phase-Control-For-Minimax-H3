@@ -10,9 +10,11 @@ NO_LORA = "none"           # no phase-2 LoRA
 
 DEFAULTS = {
     "enabled": True,
-    "phase2_steps": 3,               # 3 = Wan2GP's own schedule, left untouched
+    "phase2_steps": 3,               # Wan2GP's default; not applied while 2 Phases Plus is loaded
     "phase2_lora": DEFAULT_LORA,     # DEFAULT_LORA, NO_LORA, or an absolute path to a LoRA file
     "phase2_lora_multiplier": 1.0,
+    "replace_turbo": True,           # the chosen LoRA replaces WanGP's built-in Turbo LoRA (else added alongside)
+    "apply_to_upscaler": False,      # also apply to 2 Phases Plus' H3 Upscaler tasks
     "other_loras_off": False,        # switch every other LoRA off in phase 2
 }
 
