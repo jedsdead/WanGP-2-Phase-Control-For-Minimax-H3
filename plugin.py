@@ -79,6 +79,20 @@ class H3Phase2ControlPlugin(WAN2GPPlugin):
     def _pp_loaded():
         return compat.two_phases_plus(require_active=False) is not None
 
+    @staticmethod
+    def _native_steps():
+        from .runtime import native_phase2_steps
+        return native_phase2_steps()
+
+    @classmethod
+    def _steps_note(cls):
+        """Why the steps slider is disabled, or None when it applies."""
+        if cls._native_steps():
+            return "Disabled: this Wan2GP version has its own Phase 2 steps setting (in the generation settings)"
+        if cls._pp_loaded():
+            return "Disabled: set by 2 Phases Plus (Phase 2 Noise Level Start)"
+        return None
+
     @classmethod
     def _multiplier_tied(cls, cfg):
         return cls._pp_loaded() and cfg["replace_turbo"]
@@ -95,21 +109,19 @@ class H3Phase2ControlPlugin(WAN2GPPlugin):
         pp_loaded = self._pp_loaded()
         gr.Markdown(
             "## H3 Phase 2 Control\n"
-            "For MiniMax H3 **two-phase** generation (Guidance phases = 2). WanGP always runs phase 2 for **3 steps** "
-            "with the **FL2V Turbo v0.1** LoRA and switches off any other LoRA with \"turbo\" in its name there. "
-            "Choose the LoRA phase 2 uses instead. Settings apply to the next generation."
+            "For MiniMax H3 **two-phase** generation (Guidance phases = 2). Wan2GP runs phase 2 with the "
+            "**FL2V Turbo v0.1** LoRA. Choose the LoRA phase 2 uses instead. Settings apply to the next generation."
         )
         if pp_loaded:
             gr.Markdown(
-                "*2 Phases Plus is enabled: its Phase 2 Noise Level Start sets the phase 2 steps, so the steps slider is "
-                "disabled. With \"Replace the built-in Turbo LoRA\" on, your LoRA replaces the Turbo LoRA at 2 Phases Plus' "
+                "*2 Phases Plus is enabled. With \"Replace the built-in Turbo LoRA\" on, your LoRA replaces the Turbo LoRA at 2 Phases Plus' "
                 "Phase 2 Turbo LoRA Multiplier; turn it off to keep the Turbo LoRA and add your LoRA alongside at the "
                 "multiplier set here. Its H3 Upscaler tasks are only affected with \"Also apply to H3 Upscaler tasks\" on.*"
             )
         enabled = gr.Checkbox(label="Enable", value=current["enabled"])
+        steps_note = self._steps_note()
         steps = gr.Slider(1, 12, step=1, value=current["phase2_steps"], label="Phase 2 steps (3 = Wan2GP default)",
-                          interactive=not pp_loaded,
-                          info="Disabled: set by 2 Phases Plus (Phase 2 Noise Level Start)" if pp_loaded else None)
+                          interactive=steps_note is None, info=steps_note)
         with gr.Row():
             lora = gr.Dropdown(choices=self._lora_choices(current["phase2_lora"]), value=current["phase2_lora"],
                                label="Phase 2 LoRA", allow_custom_value=True, scale=4,
@@ -153,9 +165,14 @@ class H3Phase2ControlPlugin(WAN2GPPlugin):
     def _summary(cls, cfg):
         from .runtime import lora_choice_label
         if not cfg["enabled"]:
-            return "*Off: WanGP's default phase 2 (3 steps, FL2V Turbo v0.1) is used.*"
+            return "*Off: WanGP's default phase 2 LoRA (FL2V Turbo v0.1) is used.*"
         pp_loaded = cls._pp_loaded()
-        steps = "steps set by 2 Phases Plus" if pp_loaded else f"{int(cfg['phase2_steps'])} steps"
+        if cls._native_steps():
+            steps = "steps from Wan2GP's Phase 2 steps setting"
+        elif pp_loaded:
+            steps = "steps set by 2 Phases Plus"
+        else:
+            steps = f"{int(cfg['phase2_steps'])} steps"
         choice = cfg["phase2_lora"]
         lora = lora_choice_label(choice)
         if choice not in (DEFAULT_LORA, NO_LORA):

@@ -1,18 +1,21 @@
-"""Runtime hooks for MiniMax H3 two-phase generation: choose the LoRA used in phase 2.
+"""Runtime hooks for MiniMax H3 two-phase generation: choose the LoRA (and, on older Wan2GP, the steps) of phase 2.
 
-H3's two-phase mode denoises at half resolution (phase 1), upscales the latent, then refines it
-at full resolution (phase 2). In WanGP, phase 2 always uses the FL2V Turbo v0.1 LoRA:
-`get_loras_transformer` adds it with multiplier "0;1" (off in phase 1, on in phase 2), and a policy
-inside `generate` forces it to 1.0 and switches off every other LoRA with "turbo" in its name.
+H3's two-phase mode denoises at half resolution (phase 1), upscales the latent, then refines it at full
+resolution (phase 2). Wan2GP adds the FL2V Turbo v0.1 LoRA for phase 2 (`get_loras_transformer` returns it with
+multiplier "0;1") and a policy inside `generate` sets its phase-2 strength. Two Wan2GP generations are supported:
 
-This plugin, per generation and without editing WanGP's files:
-* wraps `get_loras_transformer` to add the chosen LoRA for phase 2 (and, on its own, replace or
-  drop the automatic Turbo LoRA);
-* wraps `update_loras_slists` for the duration of one `generate` call so that, at the switch into
-  phase 2 and after WanGP's own policy has run, the phase-2 multipliers are the ones chosen here.
+* older: the Turbo LoRA is recognised by name (`_is_required_h3_turbo`), forced to 1.0, and other "turbo" LoRAs are
+  switched off in phase 2; phase 2 always runs 3 steps (`H3_PHASE_2_SIGMAS`).
+* newer: the Turbo LoRA is tracked by position (`self._phase_2_loras` = its index, number of accelerator LoRAs) and
+  switched off when an accelerator LoRA is active in phase 2; phase 2 steps are a Wan2GP setting (`sampling_steps2`).
 
-"Replace the built-in Turbo LoRA" off keeps that LoRA and adds the chosen one alongside it. Without 2 Phases
-Plus, the number of phase-2 steps can also be set (`H3_PHASE_2_SIGMAS` is swapped for one `generate` call).
+This plugin, per generation and without editing Wan2GP's files:
+* wraps `get_loras_transformer` to add the chosen LoRA just before the Turbo LoRA (keeping Wan2GP's position
+  bookkeeping right). The Turbo LoRA itself is always kept in the list: "replaced" means switched off in phase 2;
+* wraps `update_loras_slists` for one `generate` call so that, at the switch into phase 2 and after Wan2GP's
+  policy has run, the phase-2 multipliers are the ones chosen here;
+* on older Wan2GP only, swaps `H3_PHASE_2_SIGMAS` for one `generate` call to change the number of phase-2 steps.
+
 2 Phases Plus compatibility: see compat.py.
 """
 
@@ -121,21 +124,48 @@ def _mark(function):
 
 # --------------------------------------------------------------------------- LoRA selection
 
+def native_phase2_steps():
+    """True if Wan2GP has its own phase-2 steps setting (newer Wan2GP): this plugin's step count is then not used."""
+    try:
+        import inspect
+        from models.minimax_h3 import pipeline as native
+        return "sampling_steps2" in inspect.signature(native.MiniMaxH3Pipeline.generate).parameters
+    except Exception:
+        return False
+
+
+def _builtin_turbo_name(module, model_def):
+    entry = model_def.get(getattr(module, "H3_TURBO_LORA_KEY", "minimax_h3_lora_turbo"))
+    return lora_basename(entry) if entry else None
+
+
+def _turbo_index(pipe, module, loras_selected):
+    """Index of Wan2GP's built-in phase-2 Turbo LoRA in loras_selected, or None."""
+    info = getattr(pipe, "_phase_2_loras", None)
+    if isinstance(info, tuple) and info:
+        return int(info[0])
+    name = getattr(pipe, "_h3p2c_turbo_name", None)
+    is_required = getattr(module, "_is_required_h3_turbo", None)
+    for index, lora in enumerate(loras_selected or ()):
+        lora_name = lora_basename(lora)
+        if (name and lora_name == name) or (name is None and is_required is not None and is_required(lora_name)):
+            return index
+    return None
+
+
 def _wrap_get_loras_transformer(cls, module):
     current = cls.__dict__.get("get_loras_transformer")
     if current is None or _chain_contains_wrapper(current):
         return False
     original = current
-    is_required = getattr(module, "_is_required_h3_turbo", None)
-    if is_required is None:
-        _log(f"{cls.__module__} has no _is_required_h3_turbo; phase-2 LoRA choice unavailable there")
-        return False
 
     @functools.wraps(original)
     def get_loras_transformer(self, *args, **kwargs):
         loras, multipliers = original(self, *args, **kwargs)
-        cfg = settings.get()
         model_def = kwargs.get("model_def") or {}
+        turbo_name = _builtin_turbo_name(module, model_def)
+        self._h3p2c_turbo_name = turbo_name
+        cfg = settings.get()
         if (not cfg["enabled"] or _guide_phases(kwargs.get("guidance_phases")) <= 1
                 or model_def.get("pdd", False) or model_def.get("vdn", False)):
             return loras, multipliers
@@ -148,40 +178,44 @@ def _wrap_get_loras_transformer(cls, module):
         if (two_phases_plus is not None and not cfg["apply_to_upscaler"]
                 and compat.is_upscaler_task(two_phases_plus, kwargs)):
             return loras, multipliers  # H3 Upscaler tasks left to 2 Phases Plus
-        if not cfg["replace_turbo"]:
-            kept = list(zip(loras, multipliers))  # the built-in Turbo LoRA stays (2 Phases Plus, if active, sets its strength)
-            if choice == NO_LORA:
-                _log("'No LoRA' is not applied while 'Replace the built-in Turbo LoRA' is off")
-                return loras, multipliers
-        else:
-            kept = [(lora, mult) for lora, mult in zip(loras, multipliers) if not is_required(lora_basename(lora))]
-            if len(kept) != len(loras):
-                _log(f"WanGP's automatic phase-2 Turbo LoRA replaced by: {lora_choice_label(choice)}"
-                     + (" (at 2 Phases Plus' Turbo LoRA multiplier)" if two_phases_plus is not None and choice != NO_LORA else ""))
-        if choice != NO_LORA:
-            activated = {lora_basename(lora) for lora in kwargs.get("activated_loras") or ()}
-            if lora_basename(choice) in activated:
-                _log(f"{os.path.basename(choice)} is already in your LoRA list; its phase-2 multiplier will be set at the phase switch")
-            else:
-                kept.append((str(choice), f"0;{float(cfg['phase2_lora_multiplier']):g}"))
-        return [lora for lora, _ in kept], [mult for _, mult in kept]
+        if not cfg["replace_turbo"] and choice == NO_LORA:
+            _log("'No LoRA' is not applied while 'Replace the built-in Turbo LoRA' is off")
+            return loras, multipliers
+        if cfg["replace_turbo"]:
+            _log(f"WanGP's automatic phase-2 Turbo LoRA replaced by: {lora_choice_label(choice)}"
+                 + (" (at 2 Phases Plus' Turbo LoRA multiplier)" if two_phases_plus is not None and choice != NO_LORA else ""))
+        if choice == NO_LORA:
+            return loras, multipliers  # the Turbo LoRA is switched off at the phase switch
+        activated = {lora_basename(lora) for lora in kwargs.get("activated_loras") or ()}
+        if lora_basename(choice) in activated:
+            _log(f"{os.path.basename(choice)} is already in your LoRA list; its phase-2 multiplier will be set at the phase switch")
+            return loras, multipliers
+        # Inserted before the Turbo LoRA: newer Wan2GP finds the Turbo LoRA and the accelerator LoRAs that follow it
+        # by position, so that position moves up by one.
+        loras, multipliers = list(loras), list(multipliers)
+        position = next((i for i, lora in enumerate(loras) if turbo_name and lora_basename(lora) == turbo_name), len(loras))
+        loras.insert(position, str(choice))
+        multipliers.insert(position, f"0;{float(cfg['phase2_lora_multiplier']):g}")
+        info = getattr(self, "_phase_2_loras", None)
+        if isinstance(info, tuple) and len(info) == 2 and position < len(loras) - 1:
+            self._phase_2_loras = (info[0] + 1, info[1])
+        return loras, multipliers
 
     cls.get_loras_transformer = _mark(get_loras_transformer)
     return True
 
 
-def _phase2_multiplier_hook(original_update, module, cfg, loras_selected, defer_turbo, two_phases_plus=None):
+def _phase2_multiplier_hook(original_update, module, cfg, loras_selected, defer_turbo, two_phases_plus=None, turbo_index=None):
     """update_loras_slists wrapper that rewrites the phase-2 multipliers at the phase switch.
 
     defer_turbo: the built-in Turbo LoRA is kept, so it is left to WanGP's policy or to 2 Phases Plus.
     two_phases_plus: its patch module when active. If the Turbo LoRA was replaced, the chosen LoRA takes
     2 Phases Plus' Turbo LoRA multiplier, and 2 Phases Plus is told there is no Turbo LoRA to change.
     """
-    is_required = module._is_required_h3_turbo
     choice = effective_lora_choice(cfg)
     choice_name = lora_basename(choice) if choice not in (DEFAULT_LORA, NO_LORA) else None
-    turbo_present = any(is_required(lora_basename(lora)) for lora in loras_selected or ())
-    tied = two_phases_plus is not None and not turbo_present and choice_name is not None
+    replacing = not defer_turbo and choice != DEFAULT_LORA
+    tied = two_phases_plus is not None and replacing and choice_name is not None
     state = {"done": False}
 
     def update_loras_slists(trans, slists_dict, num_inference_steps, *args, **kwargs):
@@ -196,19 +230,21 @@ def _phase2_multiplier_hook(original_update, module, cfg, loras_selected, defer_
                     multiplier = pp_multiplier
                     _log(f"phase 2: {os.path.basename(str(choice))} replaces the built-in Turbo LoRA at 2 Phases Plus' "
                          f"Turbo LoRA multiplier {multiplier:g}")
-            if two_phases_plus is not None and not turbo_present:
-                replaced = compat.turbo_replaced(two_phases_plus)
+            if two_phases_plus is not None and replacing:
+                replaced = compat.turbo_replaced(two_phases_plus)  # 2 Phases Plus must not put the Turbo LoRA back
+            if replacing and turbo_index is None:
+                _log("WARNING: Wan2GP's built-in Turbo LoRA could not be located, so it could not be switched off in phase 2")
             changes = []
             for index, lora in enumerate(loras_selected or ()):
                 if index >= len(slists_dict.get("phase2", ())):
                     break
                 name = lora_basename(lora)
-                if choice_name is not None and name == choice_name:
-                    value = multiplier
-                elif is_required(name):
-                    if defer_turbo or choice == DEFAULT_LORA:
+                if index == turbo_index:
+                    if not replacing:
                         continue  # kept: WanGP's own policy or 2 Phases Plus decides its strength
                     value = 0.0
+                elif choice_name is not None and name == choice_name:
+                    value = multiplier
                 elif cfg["other_loras_off"]:
                     value = 0.0
                 else:
@@ -254,7 +290,9 @@ def _wrap_generate(cls, module):
         patches = {}
         native = getattr(module, "H3_PHASE_2_SIGMAS", None)
         if native is not None and int(cfg["phase2_steps"]) != len(native) - 1:
-            if compat.two_phases_plus(require_active=False) is not None:
+            if "sampling_steps2" in kwargs or native_phase2_steps():
+                _log(f"phase 2 steps ({int(cfg['phase2_steps'])}) not applied: this Wan2GP version has its own Phase 2 steps setting")
+            elif compat.two_phases_plus(require_active=False) is not None:
                 _log(f"phase 2 steps ({int(cfg['phase2_steps'])}) not applied: 2 Phases Plus is loaded and sets them")
             else:
                 start = float(kwargs.get("switch_threshold") or native[0])
@@ -276,8 +314,9 @@ def _wrap_generate(cls, module):
                  + ("; other LoRAs off" if cfg["other_loras_off"] else "")
                  + (("; replaces the built-in Turbo LoRA" if not keep_turbo else "; alongside the built-in Turbo LoRA")
                     if choice_applies and choice != NO_LORA else ""))
-            patches["update_loras_slists"] = _phase2_multiplier_hook(update, module, cfg, kwargs.get("loras_selected"),
-                                                                     keep_turbo, two_phases_plus)
+            loras_selected = kwargs.get("loras_selected")
+            patches["update_loras_slists"] = _phase2_multiplier_hook(update, module, cfg, loras_selected, keep_turbo, two_phases_plus,
+                                                                     _turbo_index(self, module, loras_selected))
         if not patches:
             return original(self, *args, **kwargs)
 

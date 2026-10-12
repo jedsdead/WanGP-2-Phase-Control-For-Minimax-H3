@@ -3,11 +3,12 @@
 A Wan2GP plugin for MiniMax H3 **two-phase** generation (Guidance phases = 2): choose the LoRA and the number of steps
 used in phase 2.
 
-By default Wan2GP always runs phase 2 for 3 steps with the FL2V Turbo LoRA, and switches off any other turbo LoRA there.
+By default Wan2GP runs phase 2 with the FL2V Turbo LoRA.
 
 ## Features
 
-- **Phase 2 steps**: 1 to 12 (3 is Wan2GP's default).
+- **Phase 2 steps**: 1 to 12 (3 is Wan2GP's default). Only for older Wan2GP versions: newer ones have their own
+  Phase 2 steps setting, and the slider is disabled.
 - **Phase 2 LoRA**: Wan2GP's default, no LoRA, or any LoRA from your H3 LoRA folder, at the multiplier you
   choose. It runs in phase 2 only.
 - **Replace the built-in Turbo LoRA** (on by default). Turn it off to keep the Turbo LoRA and add your LoRA
@@ -21,7 +22,7 @@ and to `phase2_control.log` in the plugin folder.
 
 Works alongside [2 Phases Plus](https://github.com/g3n3rativ3/wan2gp-2phases-plus). While it's enabled:
 
-- The steps slider is disabled: its *Phase 2 Noise Level Start* sets the phase 2 steps.
+- The steps slider is disabled: its *Phase 2 Noise Level Start* sets the phase 2 steps (older Wan2GP).
 - With *Replace the built-in Turbo LoRA* on, your LoRA replaces the Turbo LoRA at its *Phase 2 Turbo LoRA
   Multiplier*. Turn it off to keep the Turbo LoRA and add your LoRA alongside at your own multiplier.
 - H3 Upscaler tasks are left to 2 Phases Plus unless you turn on *Also apply to H3 Upscaler tasks*.
