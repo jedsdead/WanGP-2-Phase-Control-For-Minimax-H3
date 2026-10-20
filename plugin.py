@@ -15,7 +15,7 @@ class H3Phase2ControlPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "H3 Phase 2 Control"
-        self.version = "0.2"
+        self.version = "0.3"
         self.description = "MiniMax H3 two-phase generation: choose the LoRA and the number of steps used in phase 2."
         settings.load()
 

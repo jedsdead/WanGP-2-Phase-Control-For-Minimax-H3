@@ -194,7 +194,9 @@ def _wrap_get_loras_transformer(cls, module):
         # by position, so that position moves up by one.
         loras, multipliers = list(loras), list(multipliers)
         position = next((i for i, lora in enumerate(loras) if turbo_name and lora_basename(lora) == turbo_name), len(loras))
-        loras.insert(position, str(choice))
+        # Full path: WanGP reads a relative LoRA path as relative to the LoRA folder, and the plugin's choices are
+        # relative to WanGP's folder when the LoRA folder is (loras\minimax_h3\x would become loras\minimax_h3\loras\...)
+        loras.insert(position, os.path.abspath(str(choice)))
         multipliers.insert(position, f"0;{float(cfg['phase2_lora_multiplier']):g}")
         info = getattr(self, "_phase_2_loras", None)
         if isinstance(info, tuple) and len(info) == 2 and position < len(loras) - 1:
